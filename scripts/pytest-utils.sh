@@ -19,6 +19,10 @@ pytest() {
     pytest_extra_args=(
         "--dist=worksteal"
     )
+    # Avoid torch+XPU segfault in xdist workers: run in main process (no xdist)
+    if [[ "${TRITON_TEST_NO_XDIST:-0}" = "1" ]]; then
+        pytest_extra_args=(-p no:xdist)
+    fi
 
     if [[ -v TRITON_TEST_SUITE && $TRITON_TEST_REPORTS = true ]]; then
         mkdir -p "$TRITON_TEST_REPORTS_DIR"
@@ -68,6 +72,23 @@ pytest() {
     fi
 
     export TEST_UNSKIP
+    # When xdist is disabled, drop -n and its argument so pytest does not see them
+    if [[ "${TRITON_TEST_NO_XDIST:-0}" = "1" ]]; then
+        filtered_args=()
+        skip_next=0
+        for a in "$@"; do
+            if [[ $skip_next -eq 1 ]]; then
+                skip_next=0
+                continue
+            fi
+            if [[ "$a" = "-n" ]]; then
+                skip_next=1
+                continue
+            fi
+            filtered_args+=("$a")
+        done
+        set -- "${filtered_args[@]}"
+    fi
     python -u -m pytest "${pytest_extra_args[@]}" "$@" || $TRITON_TEST_IGNORE_ERRORS
 }
 

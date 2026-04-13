@@ -9,7 +9,11 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/Types.h"
+// AMD dialect is optional; only include it when TRITON_ENABLE_AMD is set and
+// the generated headers are available.
+#if TRITON_ENABLE_AMD && __has_include("amd/include/Dialect/TritonAMDGPU/IR/Dialect.h.inc")
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
+#endif
 #include "third_party/intel/include/Dialect/TritonIntelGPU/IR/Dialect.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Gluon/IR/Dialect.h"
@@ -31,7 +35,9 @@ namespace tt = triton;
 namespace ttg = triton::gpu;
 namespace ttng = triton::nvidia_gpu;
 namespace gluon = mlir::triton::gluon;
+#if TRITON_ENABLE_AMD && __has_include("amd/include/Dialect/TritonAMDGPU/IR/Dialect.h.inc")
 namespace ttag = mlir::triton::amdgpu;
+#endif
 
 static ttg::CGAEncodingAttr
 buildCgaLayoutAttr(MLIRContext *ctx,
@@ -166,8 +172,11 @@ struct GluonLayouts {
         py::object(layouts.attr("SwizzledSharedLayout")).release();
     SharedLinearLayout =
         py::object(layouts.attr("SharedLinearLayout")).release();
+    // AMD layouts are only meaningful when AMD support is enabled.
+#if TRITON_ENABLE_AMD && __has_include("amd/include/Dialect/TritonAMDGPU/IR/Dialect.h.inc")
     AMDMFMALayout = py::object(amdLayouts.attr("AMDMFMALayout")).release();
     AMDWMMALayout = py::object(amdLayouts.attr("AMDWMMALayout")).release();
+#endif
     PaddedSharedLayout =
         py::object(layouts.attr("PaddedSharedLayout")).release();
     IntelDPASLayout =
@@ -254,7 +263,9 @@ py::object layoutToGluon(Attribute layout) {
     return layouts.AutoLayout();
   } else if (auto autoEnc = dyn_cast<gluon::CoalescedEncodingAttr>(layout)) {
     return layouts.CoalescedLayout();
-  } else if (auto amdMfma = dyn_cast<ttg::AMDMfmaEncodingAttr>(layout)) {
+  }
+#if TRITON_ENABLE_AMD && __has_include("amd/include/Dialect/TritonAMDGPU/IR/Dialect.h.inc")
+  else if (auto amdMfma = dyn_cast<ttg::AMDMfmaEncodingAttr>(layout)) {
     auto cgaBases = getCgaLayoutBases(amdMfma.getCGALayout());
     return layouts.AMDMFMALayout(
         amdMfma.getVersion(), toStdVector(amdMfma.getInstrShape()),
@@ -271,7 +282,9 @@ py::object layoutToGluon(Attribute layout) {
         amdWmma.getVersion(), amdWmma.getIsTransposed(),
         ctaLayout.getBases().lookup(kWarp), ctaLayout.getBases().lookup(kReg),
         toStdVector(amdWmma.getInstrShape()), cgaBases, amdWmma.getRank());
-  } else if (auto paddedShared =
+  }
+#endif
+  else if (auto paddedShared =
                  dyn_cast<ttg::PaddedSharedEncodingAttr>(layout)) {
     auto *ctx = paddedShared.getContext();
     std::vector<std::pair<unsigned, unsigned>> intervalPaddingPairs;
@@ -457,6 +470,8 @@ void init_gluon_ir(py::module &&m) {
                  ctx, version[0], version[1], warpsPerCta, cgaLayout,
                  instrShape);
            })
+      // AMD-specific MMA layouts are only available when AMD support is enabled.
+#if TRITON_ENABLE_AMD && __has_include("amd/include/Dialect/TritonAMDGPU/IR/Dialect.h.inc")
       .def("get_amd_mfma_layout",
            [](GluonOpBuilder &self, unsigned version,
               std::vector<unsigned> &warpsPerCta,
@@ -487,6 +502,7 @@ void init_gluon_ir(py::module &&m) {
              return ttg::AMDWmmaEncodingAttr::get(
                  ctx, version, ctaLayout, transposed, cgaLayout, instrShape);
            })
+#endif
       .def("get_intel_dpas_layout",
            [](GluonOpBuilder &self, unsigned repeatCount,
               unsigned systolicDepth, unsigned executionSize,
@@ -639,6 +655,8 @@ void init_gluon_ir(py::module &&m) {
                  pointer, smem, mask, other, cacheModifier, evictionPolicy,
                  isVolatile);
            })
+      // AMD async copy helpers are only emitted when AMD is enabled.
+#if TRITON_ENABLE_AMD && __has_include("amd/include/Dialect/TritonAMDGPU/IR/Dialect.h.inc")
       .def("create_async_copy_local_to_global",
            [](GluonOpBuilder &self, Value smem, Value pointer, Value mask,
               tt::CacheModifier cacheModifier,
@@ -646,6 +664,7 @@ void init_gluon_ir(py::module &&m) {
              self.create<ttag::AsyncCopyLocalToGlobalOp>(
                  smem, pointer, mask, cacheModifier, evictionPolicy);
            })
+#endif
       .def("create_async_copy_mbarrier_arrive",
            [](GluonOpBuilder &self, Value mbarrier, bool incrementCount) {
              self.create<ttng::AsyncCopyMbarrierArriveOp>(mbarrier,
@@ -951,6 +970,8 @@ void init_gluon_ir(py::module &&m) {
              return self.create<ttg::WarpSpecializeOp>(resultTypes,
                                                        partitionNumWarps);
            })
+      // AMD buffer ops are only available when AMD support is enabled.
+#if TRITON_ENABLE_AMD && __has_include("amd/include/Dialect/TritonAMDGPU/IR/Dialect.h.inc")
       .def("create_buffer_load",
            [](GluonOpBuilder &self, Type resultType, Value ptr, Value offsets,
               Value mask, Value other, tt::CacheModifier cache) -> Value {
@@ -979,6 +1000,7 @@ void init_gluon_ir(py::module &&m) {
              self.create<ttag::BufferLoadToLocalOp>(
                  dest, ptr, offsets, mask, other, stride, cacheModifier);
            })
+#endif
       .def("create_make_tensor_descriptor",
            [](TritonOpBuilder &self, Type resultTy, Value &base,
               std::vector<Value> &shape, std::vector<Value> &strides,
@@ -986,6 +1008,8 @@ void init_gluon_ir(py::module &&m) {
              return self.create<tt::MakeTensorDescOp>(resultTy, base, shape,
                                                       strides, paddingOption);
            })
+      // AMD TDM / LDS barrier helpers are only available when AMD is enabled.
+#if TRITON_ENABLE_AMD && __has_include("amd/include/Dialect/TritonAMDGPU/IR/Dialect.h.inc")
       .def("create_async_tdm_copy_global_to_local",
            [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &indices,
               Value result, Value pred, Value barrier) {
@@ -1047,6 +1071,7 @@ void init_gluon_ir(py::module &&m) {
            [](GluonOpBuilder &self) {
              self.create<ttag::ClusterBarrierWaitOp>();
            })
+#endif
       .def("create_warp_pipeline_border",
            [](GluonOpBuilder &self, const std::string &marker, int priority) {
              auto border = self.create<ROCDL::SchedBarrier>(0);

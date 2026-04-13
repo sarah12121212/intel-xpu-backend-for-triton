@@ -24,6 +24,27 @@ option(LLVM_BUILD_SHARED_LIBS
   "Build all libraries as shared libraries instead of static" OFF)
 set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
 
+# Optional developer tooling (CLI binaries, tests, examples). These are not
+# required to build or use the Triton Python package and can be disabled when
+# embedding Triton in larger projects.
+option(TRITON_BUILD_TOOLS "Build Triton CLI tools (triton-opt, triton-reduce, ...)" ON)
+
+# Allow consumers (like Triton-distributed) to completely disable AMD-specific
+# dialects and passes in the Intel Triton fork. When OFF, we compile out
+# AMD-only code paths so that missing AMD tablegen headers don't break builds.
+option(TRITON_ENABLE_AMD "Enable AMD-specific dialects and passes" ON)
+option(TRITON_ENABLE_PROTON "Enable Proton profiling dialects and passes" ON)
+if(TRITON_ENABLE_AMD)
+  add_compile_definitions(TRITON_ENABLE_AMD=1)
+else()
+  add_compile_definitions(TRITON_ENABLE_AMD=0)
+endif()
+if(TRITON_ENABLE_PROTON)
+  add_compile_definitions(TRITON_ENABLE_PROTON=1)
+else()
+  add_compile_definitions(TRITON_ENABLE_PROTON=0)
+endif()
+
 if(TRITON_BUILD_WITH_CCACHE)
   find_program(CCACHE_PROGRAM ccache)
   if(CCACHE_PROGRAM)
@@ -197,12 +218,14 @@ if(TRITON_BUILD_PYTHON_MODULE)
     add_subdirectory(third_party/${CODEGEN_BACKEND})
   endforeach()
 
-  if (TRITON_BUILD_PROTON)
+  if (TRITON_BUILD_PROTON AND TRITON_ENABLE_PROTON)
     add_subdirectory(third_party/proton)
   endif()
-  # We always build proton dialect
-  list(APPEND TRITON_PLUGIN_NAMES "proton")
-  add_subdirectory(third_party/proton/Dialect)
+  # Proton dialect is optional; only build when enabled.
+  if(TRITON_ENABLE_PROTON)
+    list(APPEND TRITON_PLUGIN_NAMES "proton")
+    add_subdirectory(third_party/proton/Dialect)
+  endif()
 
   if (DEFINED TRITON_PLUGIN_DIRS)
     foreach(PLUGIN_DIR ${TRITON_PLUGIN_DIRS})
@@ -257,6 +280,8 @@ if(TRITON_BUILD_PYTHON_MODULE)
     # LLVMNVPTXAsmPrinter
     LLVMAMDGPUCodeGen
     LLVMAMDGPUAsmParser
+    # LLVM pass plugin loader (defines llvm::PassPlugin::Load)
+    LLVMPlugins
 
     Python3::Module
     pybind11::headers
@@ -281,6 +306,12 @@ if(TRITON_BUILD_PYTHON_MODULE)
       )
   else()
     message(FATAL_ERROR "LLVM codegen/ASM parser libs: This HW architecture (${CMAKE_SYSTEM_PROCESSOR}) is not configured in cmake lib dependencies.")
+  endif()
+
+  # Prebuilt LLVM may not expose LLVMPlugins target; link by path so llvm::PassPlugin::Load is defined
+  if(DEFINED LLVM_LIBRARY_DIR AND EXISTS "${LLVM_LIBRARY_DIR}/libLLVMPlugins.a")
+    list(APPEND TRITON_LIBRARIES "${LLVM_LIBRARY_DIR}/libLLVMPlugins.a")
+    message(STATUS "Linking libLLVMPlugins.a from ${LLVM_LIBRARY_DIR}")
   endif()
 
   # Define triton library
@@ -354,22 +385,27 @@ if(NOT TRITON_BUILD_PYTHON_MODULE)
   foreach(CODEGEN_BACKEND ${TRITON_CODEGEN_BACKENDS})
     add_subdirectory(third_party/${CODEGEN_BACKEND})
   endforeach()
-  add_subdirectory(third_party/proton/Dialect)
+  if(TRITON_ENABLE_PROTON)
+    add_subdirectory(third_party/proton/Dialect)
+  endif()
 endif()
 
 find_package(Threads REQUIRED)
 
 add_subdirectory(third_party/f2reduce)
-add_subdirectory(bin)
-add_subdirectory(test)
-add_subdirectory(examples)
 
-if(TRITON_BUILD_UT)
-  add_subdirectory(unittest)
-  # This target runs all the unit tests.
-  add_custom_target(check-triton-unit-tests
-    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS TritonUnitTests
-    USES_TERMINAL
-  )
+if(TRITON_BUILD_TOOLS)
+  add_subdirectory(bin)
+  add_subdirectory(test)
+  add_subdirectory(examples)
+
+  if(TRITON_BUILD_UT)
+    add_subdirectory(unittest)
+    # This target runs all the unit tests.
+    add_custom_target(check-triton-unit-tests
+      COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+      DEPENDS TritonUnitTests
+      USES_TERMINAL
+    )
+  endif()
 endif()
