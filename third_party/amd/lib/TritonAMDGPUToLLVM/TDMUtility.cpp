@@ -4,11 +4,46 @@
 #include "triton/Tools/LayoutUtils.h"
 #include <optional>
 
-// Include shared C-compatible TDM utilities
-#include "../../backend/include/TDMCommon.h"
-
 namespace mlir::LLVM::AMD {
 namespace {
+
+// Distribute numWarps across dimensions so product(warps)==numWarps and
+// blockShape[i] % warps[i] == 0. Greedy: assign largest valid divisor per dim.
+static void getWarpDistributionImpl(ArrayRef<int64_t> blockShape, int numWarps,
+                                    SmallVectorImpl<int> &warps) {
+  int numDims = blockShape.size();
+  warps.resize(numDims);
+  int remaining = numWarps;
+  for (int i = 0; i < numDims; ++i) {
+    warps[i] = 1;
+    if (remaining <= 1) continue;
+    int64_t dimSize = blockShape[i];
+    int lim = static_cast<int>(dimSize < remaining ? dimSize : remaining);
+    for (int w = lim; w >= 1; --w) {
+      if (remaining % w == 0 && (dimSize % static_cast<int64_t>(w)) == 0) {
+        warps[i] = w;
+        remaining /= w;
+        break;
+      }
+    }
+  }
+  if (remaining != 1) {
+    warps[0] = numWarps;
+    for (int i = 1; i < numDims; ++i) warps[i] = 1;
+  }
+}
+
+// Block shape per warp: blkShapePerWarp[i] = blockShape[i] / warps[i].
+// Replaces tdmGetAdjustedBlockShape from the missing backend TDMCommon.h.
+static void getAdjustedBlockShapeImpl(ArrayRef<int64_t> blockShape, int numDims,
+                                      int numWarps,
+                                      SmallVectorImpl<int64_t> &blkShapePerWarp) {
+  SmallVector<int> warps;
+  getWarpDistributionImpl(blockShape, numWarps, warps);
+  blkShapePerWarp.resize(numDims);
+  for (int i = 0; i < numDims; ++i)
+    blkShapePerWarp[i] = blockShape[i] / static_cast<int64_t>(warps[i]);
+}
 
 // Helper to encode a 48-bit value: 32 bits in first word, 16 bits in second
 // word
@@ -58,14 +93,11 @@ decodeTDMDescriptor(RewriterBase &rewriter, Location loc,
   return {srcPtr, tensorShape, tensorStride};
 }
 
-// C++ wrapper for the shared tdmGetWarpDistribution function
 SmallVector<int> getWarpDistribution(ArrayRef<int64_t> blockShape,
                                      int numWarps) {
+  SmallVector<int> warps;
+  getWarpDistributionImpl(blockShape, numWarps, warps);
   int numDims = blockShape.size();
-  SmallVector<int> warps(numDims);
-  tdmGetWarpDistribution(blockShape.data(), numDims, numWarps, warps.data());
-
-  // Verify the distribution is valid
   int totalWarps = 1;
   for (int i = 0; i < numDims; ++i) {
     totalWarps *= warps[i];
@@ -73,7 +105,6 @@ SmallVector<int> getWarpDistribution(ArrayRef<int64_t> blockShape,
            "Block shape must be divisible by warp distribution");
   }
   assert(totalWarps == numWarps && "Warp distribution mismatch");
-
   return warps;
 }
 } // namespace
@@ -215,12 +246,11 @@ TDMDescriptor createTDMDescriptor(RewriterBase &rewriter, Location loc,
     tensorStride[i] = b.trunc(i32_ty, tensorStride[i]);
   }
 
-  // Distribute block among warps
+  // Distribute block among warps (block shape per warp)
   {
-    int64_t blkShapePerWarp[5];
-    tdmGetAdjustedBlockShape(blockShape.data(), numDims, numWarps,
-                             &blkShapePerWarp[0]);
-    blockShape.assign(blkShapePerWarp, blkShapePerWarp + blockShape.size());
+    SmallVector<int64_t> blkShapePerWarp;
+    getAdjustedBlockShapeImpl(blockShape, numDims, numWarps, blkShapePerWarp);
+    blockShape.assign(blkShapePerWarp.begin(), blkShapePerWarp.end());
   }
 
   // group0 (128 bits / 4 dwords) effective bit encoding:
